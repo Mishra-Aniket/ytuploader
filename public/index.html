@@ -339,7 +339,8 @@
         <!-- Connected Badge (Owner) -->
         <div id="navConnectedBadge" class="hidden items-center gap-2 px-3 h-8 border border-emerald-300 dark:border-emerald-700/60 bg-emerald-100 dark:bg-emerald-950/60 text-emerald-900 dark:text-emerald-300 font-semibold text-[11px] uppercase tracking-wider">
           <span class="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 inline-block"></span>
-          <span>Google Connected</span>
+          <span id="navConnectedEmailLabel">Google Connected</span>
+          <span id="navPwBadge" class="hidden px-1.5 py-0.2 bg-purple-600 text-white font-bold text-[9px] rounded-xs shadow-xs">PW LIVE</span>
           <button type="button" onclick="openAuthModal()" class="text-emerald-700 dark:text-emerald-400 hover:text-emerald-950 dark:hover:text-emerald-200 underline ml-1 cursor-pointer font-bold lowercase">settings</button>
         </div>
 
@@ -3987,6 +3988,84 @@
       copyToClipboard(origin, 'Origin URL');
     };
 
+    // ══════════════════════════════════════════════════════════════════
+    // PW ACCOUNT VERIFICATION & DOMAIN VALIDATION (@pw.live)
+    // ══════════════════════════════════════════════════════════════════
+    window.currentUserEmail = null;
+
+    window.isPwUser = function() {
+      const email = (
+        window.currentUserEmail || 
+        window.editorEmail || 
+        AppStorage.getItem('oauth_user_email') || 
+        AppStorage.getItem('editor_email') || 
+        ''
+      ).toLowerCase().trim();
+      return email.endsWith('@pw.live');
+    };
+
+    window.updatePwBadgeUI = function() {
+      const isPw = window.isPwUser();
+      const email = (
+        window.currentUserEmail || 
+        window.editorEmail || 
+        AppStorage.getItem('oauth_user_email') || 
+        AppStorage.getItem('editor_email') || 
+        ''
+      ).trim();
+      const label = document.getElementById('navConnectedEmailLabel');
+      const pwBadge = document.getElementById('navPwBadge');
+      if (label) {
+        label.textContent = email ? email : 'Google Connected';
+      }
+      if (pwBadge) {
+        if (isPw) {
+          pwBadge.classList.remove('hidden');
+          pwBadge.className = 'px-1.5 py-0.2 bg-purple-600 text-white font-bold text-[9px] rounded-xs shadow-xs';
+          pwBadge.textContent = 'PW LIVE';
+        } else {
+          pwBadge.classList.add('hidden');
+        }
+      }
+    };
+
+    window.fetchUserProfile = async function() {
+      let emailFound = false;
+      try {
+        const headers = {};
+        if (window.gAccessToken) {
+          headers['Authorization'] = `Bearer ${window.gAccessToken}`;
+        }
+        const res = await fetch('/api/auth/status', { headers });
+        const data = await res.json();
+        if (data && data.email) {
+          window.currentUserEmail = data.email;
+          AppStorage.setItem('oauth_user_email', data.email);
+          emailFound = true;
+        }
+      } catch (e) {}
+
+      if (!emailFound && window.gAccessToken) {
+        try {
+          const gRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { 'Authorization': `Bearer ${window.gAccessToken}` }
+          });
+          if (gRes.ok) {
+            const uInfo = await gRes.json();
+            if (uInfo && uInfo.email) {
+              window.currentUserEmail = uInfo.email;
+              AppStorage.setItem('oauth_user_email', uInfo.email);
+            }
+          }
+        } catch (e) {}
+      }
+
+      window.updatePwBadgeUI();
+      if (typeof renderFilteredTable === 'function') {
+        renderFilteredTable();
+      }
+    };
+
     window.checkAuthStatus = function() {
       try {
         const isEditor = !!window.isEditorSession;
@@ -4027,6 +4106,10 @@
             navAuthBtn.classList.remove('hidden');
             navAuthBtn.classList.add('flex');
           }
+        }
+        window.updatePwBadgeUI();
+        if (isAuth && !window.currentUserEmail) {
+          window.fetchUserProfile();
         }
         renderFilteredTable();
       } catch (e) {
@@ -4529,6 +4612,9 @@
     window.logoutGoogle = function() {
       AppStorage.removeItem('oauth_access_token');
       AppStorage.removeItem('oauth_token_expiry');
+      AppStorage.removeItem('oauth_user_email');
+      window.currentUserEmail = null;
+      window.tableThumbCache = {};
       window.gAccessToken = null;
       window.isAuthenticated = false;
       window.serverAuthActive = false;
@@ -4887,7 +4973,10 @@
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/youtube.upload',
         'https://www.googleapis.com/auth/youtube.force-ssl',
-        'https://www.googleapis.com/auth/youtube'
+        'https://www.googleapis.com/auth/youtube',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'email',
+        'profile'
       ].join(' ');
 
       if (window.google && window.google.accounts && window.google.accounts.oauth2) {
@@ -4902,6 +4991,9 @@
                 const expiresIn = tokenResponse.expires_in || 3500;
                 AppStorage.setItem('oauth_access_token', tokenResponse.access_token);
                 AppStorage.setItem('oauth_token_expiry', Date.now() + expiresIn * 1000);
+                if (typeof window.fetchUserProfile === 'function') {
+                  window.fetchUserProfile();
+                }
                 checkAuthStatus();
                 connectSSE();
                 closeAuthModal();
@@ -5155,6 +5247,10 @@
     window.bulkThumbnailsMap = {};
 
     window.bulkGenerateSmartThumbnails = async function() {
+      if (!window.isPwUser || !window.isPwUser()) {
+        showToast('🔒 Smart Branded Thumbnails are only available for official @pw.live accounts.', 'warn');
+        return;
+      }
       if (!scannedFilesList || scannedFilesList.length === 0) {
         showToast('No scanned videos found to generate thumbnails for.', 'info');
         return;
@@ -6792,7 +6888,18 @@
 
         populateFacultyDropdown(window.thumbcraftTeachers || [], selectedDriveId);
 
-        renderThumbCraftCanvas();
+        if (window.isPwUser && window.isPwUser()) {
+          renderThumbCraftCanvas();
+        } else {
+          const ytId = (typeof extractYouTubeVideoId === 'function') ? extractYouTubeVideoId(file) : (file.videoId || null);
+          const isYt = (typeof isYouTubeVideo === 'function') ? isYouTubeVideo(file) : !!ytId;
+          const normalThumb = (isYt && ytId)
+            ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`
+            : (file.thumbnailUrl || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 614" fill="%231a1a1a"%3E%3Crect width="1280" height="614" fill="%2318181b"/%3E%3Ccircle cx="640" cy="307" r="72" fill="%2327272a"/%3E%3Cpolygon points="620,277 675,307 620,337" fill="%2371717a"/%3E%3Ctext x="640" y="440" font-family="system-ui, sans-serif" font-size="28" font-weight="bold" fill="%23a1a1aa" text-anchor="middle"%3EVIDEO PREVIEW%3C/text%3E%3C/svg%3E');
+          const preview = document.getElementById('editModalThumbPreview');
+          if (preview) preview.src = normalThumb;
+          window.generatedBase64Thumbnail = null;
+        }
 
         document.getElementById('editModalThumbUrlInput').value = '';
         document.getElementById('editVideoModal').classList.remove('hidden');
@@ -7305,6 +7412,24 @@
       const ytId = (typeof extractYouTubeVideoId === 'function') ? extractYouTubeVideoId(file) : (file.videoId || null);
       const isYt = (typeof isYouTubeVideo === 'function') ? isYouTubeVideo(file) : !!ytId;
 
+      // ─────────────────────────────────────────────────────────────
+      // NON-PW ACCOUNT RESTRICTION:
+      // If user is NOT logged in with an official PW account (@pw.live),
+      // DO NOT show internal ThumbCraft branded thumbnails. Show normal thumbnail only!
+      // ─────────────────────────────────────────────────────────────
+      if (!window.isPwUser || !window.isPwUser()) {
+        if (isYt && ytId) {
+          return `https://i.ytimg.com/vi/${ytId}/mqdefault.jpg`;
+        }
+        if (file.thumbnailUrl && !file.thumbnailUrl.startsWith('data:image') && !file.thumbnailUrl.includes('thumbcraft_template')) {
+          return file.thumbnailUrl;
+        }
+        return 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 614" fill="%231a1a1a"%3E%3Crect width="1280" height="614" fill="%2318181b"/%3E%3Ccircle cx="640" cy="307" r="72" fill="%2327272a"/%3E%3Cpolygon points="620,277 675,307 620,337" fill="%2371717a"/%3E%3Ctext x="640" y="440" font-family="system-ui, sans-serif" font-size="28" font-weight="bold" fill="%23a1a1aa" text-anchor="middle"%3EVIDEO PREVIEW%3C/text%3E%3C/svg%3E';
+      }
+
+      // ─────────────────────────────────────────────────────────────
+      // PW VERIFIED USERS ONLY (@pw.live): Official ThumbCraft Engine
+      // ─────────────────────────────────────────────────────────────
       // 1. Agar pehle se thumbnail lagaya hua hai -> WAHI RAKHO! Kabhi overwrite mat karo!
       if (file.hasCustomThumbnail || file.thumbnailApplied) {
         return file.thumbnailUrl || (isYt && ytId ? `https://i.ytimg.com/vi/${ytId}/mqdefault.jpg` : '');
@@ -7322,9 +7447,10 @@
         ? `https://i.ytimg.com/vi/${ytId}/mqdefault.jpg` 
         : (file.thumbnailUrl || '/assets/thumbcraft_template.png');
 
-      // Sirf unhi videos ke liye official ThumbCraft generate karo jinpe abhi tak koi thumbnail nahi lagaya gaya!
+      // Sirf PW verified users ke liye official ThumbCraft generate karo!
       setTimeout(async () => {
         try {
+          if (!window.isPwUser || !window.isPwUser()) return;
           const headline = (subName || 'LECTURE').toUpperCase();
           const batchClean = (rawBatchCode && rawBatchCode !== '—') ? rawBatchCode : 'PW BATCH';
           const base64 = await window.generateThumbCraftBase64(headline, batchClean, subName, teacherDriveId);
@@ -7344,6 +7470,10 @@
 
 
     window.generateSmartThumbnail = function() {
+      if (!window.isPwUser || !window.isPwUser()) {
+        showToast('🔒 Official ThumbCraft thumbnails are restricted to official @pw.live accounts.', 'warn');
+        return;
+      }
       renderThumbCraftCanvas();
       showToast('✔ Official ThumbCraft Thumbnail generated!', 'success');
     };
@@ -8521,6 +8651,9 @@
         }
 
         checkAuthStatus();
+        if (typeof window.fetchUserProfile === 'function') {
+          window.fetchUserProfile();
+        }
         connectSSE();
         loadJobStatus();
         if (window.isAuthenticated && !window.isEditorSession) {

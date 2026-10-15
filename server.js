@@ -501,7 +501,10 @@ app.get('/api/auth/url', (req, res) => {
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/youtube.upload',
         'https://www.googleapis.com/auth/youtube.force-ssl',
-        'https://www.googleapis.com/auth/youtube'
+        'https://www.googleapis.com/auth/youtube',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'email',
+        'profile'
       ]
     });
     res.json({ success: true, url: authUrl });
@@ -530,6 +533,17 @@ app.get('/api/auth/callback', async (req, res) => {
     if (tokens.access_token) {
       db.setSetting('oauth_access_token', tokens.access_token);
       db.setSetting('oauth_token_expiry', String(tokens.expiry_date || (Date.now() + 3600000)));
+
+      try {
+        oauth2Client.setCredentials(tokens);
+        const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+        const userInfo = await oauth2.userinfo.get();
+        if (userInfo.data && userInfo.data.email) {
+          db.setSetting('oauth_user_email', userInfo.data.email);
+        }
+      } catch (uErr) {
+        console.warn('Could not fetch userinfo in OAuth callback:', uErr.message);
+      }
     }
     
     res.send('<html><body><script>window.opener ? window.opener.postMessage("auth_success","*") : null; window.location.href = "/?auth=success";</script><p>Authentication successful! Redirecting...</p></body></html>');
@@ -539,11 +553,28 @@ app.get('/api/auth/callback', async (req, res) => {
 });
 
 // 4. GET /api/auth/status
-app.get('/api/auth/status', (req, res) => {
+app.get('/api/auth/status', async (req, res) => {
   try {
     const creds = db.getActiveCredentials();
     const hasRefreshToken = creds && creds.length > 0;
-    res.json({ success: true, connected: hasRefreshToken, hasRefreshToken });
+    let email = db.getSetting('oauth_user_email')?.value || null;
+
+    if (!email && hasRefreshToken) {
+      try {
+        const auth = getOAuth2Client(req);
+        if (auth) {
+          const oauth2 = google.oauth2({ version: 'v2', auth });
+          const userInfo = await oauth2.userinfo.get();
+          if (userInfo.data && userInfo.data.email) {
+            email = userInfo.data.email;
+            db.setSetting('oauth_user_email', email);
+          }
+        }
+      } catch (e) {}
+    }
+
+    const isPwUser = !!(email && email.toLowerCase().endsWith('@pw.live'));
+    res.json({ success: true, connected: hasRefreshToken, hasRefreshToken, email, isPwUser });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -558,6 +589,7 @@ app.post('/api/auth/revoke', (req, res) => {
     }
     db.setSetting('oauth_client_id', '');
     db.setSetting('oauth_client_secret', '');
+    db.setSetting('oauth_user_email', '');
     db.setSetting('oauth_access_token', '');
     db.setSetting('oauth_token_expiry', '');
     res.json({ success: true });
